@@ -13,8 +13,8 @@ double testTightCompaction(unsigned char *buffer, size_t N, size_t block_size,
   double ptime;
   ocall_clock(&start_time);
 
-  //TightCompact<uint32_t>(buffer, N, block_size, selected_list);
-  TightCompact_v2_parallel(buffer, N, block_size, selected_list, nthreads);
+  TightCompact_v2(buffer, N, block_size, selected_list);
+  //TightCompact_v2_parallel(buffer, N, block_size, selected_list, nthreads);
 
   ocall_clock(&stop_time);
   ptime = ((double)(stop_time - start_time))/1000.0;

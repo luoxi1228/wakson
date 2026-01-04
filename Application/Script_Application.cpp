@@ -493,7 +493,7 @@ int main(int argc, char *argv[]){
 
   // Create buffer of items to shuffle
   
-  if(MODE==21 or MODE==22) {
+  if(MODE==21 or MODE==22  or MODE==6) {
     ENCRYPTION=false; 
   }
 
@@ -525,7 +525,7 @@ int main(int argc, char *argv[]){
 
 
   bool *selected_list = NULL;
-  if(MODE==21||MODE==22)
+  if(MODE==21||MODE==22||MODE==6)
     selected_list = new bool[N]{};
   int *key_counts;
 
@@ -534,8 +534,8 @@ int main(int argc, char *argv[]){
     if(MODE>=1 && MODE <=9) {
       key_counts = new int[N]{};
     }
-    
-    if(MODE==21 || MODE ==22) {
+
+    if(MODE==21 || MODE ==22 || MODE == 6) {
       randomizeSelectedList(selected_list, N, randfd);
     }
     
@@ -716,8 +716,12 @@ int main(int argc, char *argv[]){
         break;
 
       case 6:
-        DecryptAndOblivButterflyCompact(buf, (uint32_t) N, ENC_BLOCK_SIZE, buf, &ret);
-        pure_ptime_array[r] = ret.ptime;
+        //DecryptAndOblivButterflyCompact(buf, (uint32_t) N, ENC_BLOCK_SIZE, buf, &ret);
+        pure_ptime = testButterflyCompaction(buf, N, BLOCK_SIZE, selected_list, &ret);
+        //printf("After TTC\n");
+        //printBufferKeys(buf, N, BLOCK_SIZE);
+        pure_ptime_array[r]=pure_ptime;
+        //pure_ptime_array[r] = ret.ptime;
         num_oswaps[r] = ret.OSWAP_count;
         num_oswaps_cb[r] = ret.OSWAP_cb;    // 控制位计算阶段的交换次数
         num_oswaps_ap[r] = ret.OSWAP_ap;    // 应用阶段的交换次数
@@ -839,9 +843,9 @@ int main(int argc, char *argv[]){
       case 21:
         //printBufferKeys(buf, N, BLOCK_SIZE);
         //printSelected(selected_list, N);
-        printf("Before TTC\n");
+        //printf("Before TTC\n");
         pure_ptime = testTightCompaction(buf, N, BLOCK_SIZE, nthreads, selected_list, &ret);
-        printf("After TTC\n");
+        //printf("After TTC\n");
         //printBufferKeys(buf, N, BLOCK_SIZE);
         pure_ptime_array[r]=pure_ptime;
         num_oswaps[r]=ret.OSWAP_count;
@@ -1041,18 +1045,19 @@ int main(int argc, char *argv[]){
   }
 
   if (MODE == 6) {
-    double cb_mean = calculateMean(butterfly_cb_time+1, REPEAT-1);
-    double ap_mean = calculateMean(butterfly_ap_time+1, REPEAT-1);
-    double cb_std  = calculateStdDevGivenMean(butterfly_cb_time+1, REPEAT-1, cb_mean);
-    double ap_std  = calculateStdDevGivenMean(butterfly_ap_time+1, REPEAT-1, ap_mean);
+      double cb_mean = calculateMean(butterfly_cb_time+1, REPEAT-1);
+      double ap_mean = calculateMean(butterfly_ap_time+1, REPEAT-1);
+      double cb_std  = calculateStdDevGivenMean(butterfly_cb_time+1, REPEAT-1, cb_mean);
+      double ap_std  = calculateStdDevGivenMean(butterfly_ap_time+1, REPEAT-1, ap_mean);
 
-    printf("%f\n", cb_mean);
-    printf("%f\n", cb_std);
-    printf("%f\n", ap_mean);
-    printf("%f\n", ap_std);
-    printf("%ld\n", num_oswaps_cb[0]);
-    printf("%ld\n", num_oswaps_ap[0]);
+      printf("%f\n", cb_mean);
+      printf("%f\n", cb_std);
+      printf("%f\n", ap_mean);
+      printf("%f\n", ap_std);
+      printf("%ld\n", num_oswaps_cb[0]);
+      printf("%ld\n", num_oswaps_ap[0]);
   }
+
 
   
   close(randfd);
@@ -1065,7 +1070,7 @@ int main(int argc, char *argv[]){
   if(BLOCK_SIZE >= DATA_ENCRYPT_MIN_SIZE)
     delete []zeroes;
 
-  if(MODE==21||MODE==22){
+  if(MODE==21||MODE==22 || MODE==6) {
     delete []selected_list;
     delete []og_buf;
   }

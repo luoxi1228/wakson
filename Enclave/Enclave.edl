@@ -65,6 +65,7 @@ enclave {
     from "WaksmanNetwork/WaksmanNetwork.edl" import *;
 
     from "ButterflyNetwork/ButterflyNetwork.edl" import *;
+    from "ButterflyNetwork/ButterflyCompaction.edl" import *;
 
     /*
      * ocall_print_string - invokes OCALL to display string buffer inside the enclave.

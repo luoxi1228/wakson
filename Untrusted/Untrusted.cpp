@@ -104,6 +104,12 @@ void Enclave_testMT() {
 */
 
 
+double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_size, bool *selected_list, enc_ret *ret){
+  double r;
+  testButterflyCompaction(global_eid, &r, buffer, N, block_size, selected_list, ret);
+  return r;
+}
+
 double testTightCompaction(unsigned char *buffer, size_t N, size_t block_size, 
         size_t nthreads, bool *selected_list, enc_ret *ret){
   double r;
