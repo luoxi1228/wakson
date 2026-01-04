@@ -1,0 +1,10 @@
+enclave {
+    trusted {
+        public void DJBWaksmanShuffle([user_check] unsigned char *buffer, size_t N, size_t block_size, [user_check] enc_ret *ret);
+
+        public void DecryptAndDJBWaksmanShuffle([user_check] unsigned char *encrypted_buffer, size_t N, size_t encrypted_block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+
+        public void DecryptAndDJBWaksmanSort([user_check] unsigned char *encrypted_buffer, size_t N, size_t encrypted_block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+
+    };
+};

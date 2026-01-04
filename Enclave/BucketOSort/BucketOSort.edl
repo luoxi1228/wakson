@@ -1,0 +1,26 @@
+
+enclave{
+
+  include "../CONFIG.h"
+  trusted {
+
+    // Basic ECALLS for BOS (single-threaded): 
+
+    public double DecryptAndBOS([user_check] unsigned char *encrypted_input, size_t N, 
+                   size_t block_size, [user_check] bos_params *params, 
+                   size_t nthreads,
+                   [user_check] unsigned char *result, [user_check] enc_ret *ret);
+
+    public double DecryptAndBORP([user_check] unsigned char *encrypted_input, size_t N, 
+                   size_t block_size, [user_check] bos_params *params, 
+                   size_t nthreads,
+                   [user_check] unsigned char *result, [user_check] enc_ret *ret);
+
+    // Optimizer Tuning Functions
+    public int process_MSN([user_check] unsigned char *packet, [user_check] bos_params* params, 
+            size_t repeat);
+  };
+
+  untrusted{
+  };
+};

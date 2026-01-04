@@ -1,0 +1,5 @@
+enclave {
+    trusted {
+        public void DecryptAndOblivButterflyCompact([user_check] unsigned char *encrypted_buffer, uint32_t N, size_t encrypted_block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+    };
+};

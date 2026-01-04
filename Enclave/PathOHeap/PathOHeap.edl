@@ -1,0 +1,7 @@
+enclave {
+    trusted {
+        public void TestRand();
+        public void HeapSort([user_check] unsigned char *outbuf, [user_check] const unsigned char *inbuf, size_t len, int internal);
+        public void HeapSort_LoadTestKeys([in] unsigned char inkey[16], [in] unsigned char outkey[16]);
+    };
+};

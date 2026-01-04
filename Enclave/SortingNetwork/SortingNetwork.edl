@@ -1,0 +1,16 @@
+enclave {
+    trusted {
+        public void OddEvenMergeSort([user_check] unsigned char *buf, uint64_t N, size_t block_size);
+
+        public double DecryptAndOddEvenMergeSort([user_check] unsigned char *encrypted_buffer, uint64_t N, size_t block_size, [user_check] unsigned char *result_buffer);
+
+        public double DecryptAndOddEvenMergeSort_timed([user_check] unsigned char *encrypted_buffer, uint64_t N, size_t block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+
+        public double DecryptAndBitonicSort([user_check] unsigned char *encrypted_buffer, uint64_t N, size_t block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+
+        public double DecryptAndBitonicSortShuffle([user_check] unsigned char *encrypted_buffer, uint64_t N, size_t block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+
+        public double DecryptAndOddEvenMergeSortShuffle([user_check] unsigned char *encrypted_buffer, uint64_t N, size_t block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+
+    };
+};

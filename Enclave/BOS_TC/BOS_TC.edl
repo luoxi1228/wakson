@@ -1,0 +1,7 @@
+
+enclave {
+    trusted {
+      public double DecryptAndBORP_TC([user_check] unsigned char *encrypted_buffer, uint64_t N, 
+              size_t encrypted_block_size, [user_check] unsigned char *result_buffer, [user_check] enc_ret *ret);
+    };
+};
