@@ -28,12 +28,23 @@ void generateControlBits(const bool* selected_list,
                          size_t n,
                          std::vector<uint8_t>& ctrlBits);
 
+void RecGenerateControlBits(const bool* selected_list,
+                           size_t n,
+                           std::vector<uint8_t>& ctrlBits);
+
 // -------- online ----------
 template <OSwap_Style oswap_style>
 void applyCompaction(unsigned char* buf,
                      size_t n,
                      size_t block_size,
                      const std::vector<uint8_t>& ctrlBits);
+
+template <OSwap_Style oswap_style>
+void RecApplyCompaction(unsigned char* buf,
+                        size_t n,
+                        size_t block_size,
+                        const std::vector<uint8_t>& ctrlBits);
+
 
 double testButterflyCompaction(unsigned char* buffer,
                                size_t N,
