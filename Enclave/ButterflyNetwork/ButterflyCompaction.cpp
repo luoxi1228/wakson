@@ -11,16 +11,7 @@ struct BNPacket
 
 static_assert(sizeof(BNPacket) == 8, "BNPacket must be 8 bytes");
 
-// 辅助宏：向位压缩数组写入第 i 位 (设为 1)
-#define SET_BIT(arr, i) ((arr)[(i) >> 3] |= (uint8_t)(1u << ((i) & 7)))
 
-
-/**
- * 负责通用的初始化工作：
- * - 初始化 P 数组
- * - 计算 Rank
- * - 分配位压缩的 ctrlBits 空间
- */
 static bool PrepareCompactionContext(const bool *selected_list, size_t n, std::vector<uint8_t> &ctrlBits, std::vector<BNPacket> &P, uint32_t &out_Npad, uint32_t &out_l){
     // 1. 输入检查
     ctrlBits.clear();
@@ -41,10 +32,7 @@ static bool PrepareCompactionContext(const bool *selected_list, size_t n, std::v
     P.resize(out_Npad);
     for (uint32_t i = 0; i < out_Npad; ++i)
     {
-        // 【保持原逻辑】直接读取 bool 数组
-        // 如果 i < n，读取 selected_list[i]；Padding 部分补 0
         uint32_t is_selected = (i < n && selected_list[i]) ? 1u : 0u;
-        
         P[i].value = is_selected;
         P[i].tag = 0;
     }
@@ -54,18 +42,16 @@ static bool PrepareCompactionContext(const bool *selected_list, size_t n, std::v
     for (uint32_t i = 0; i < out_Npad; ++i)
     {
         const uint32_t v = P[i].value;
-        P[i].tag = rank * v; // value为0时tag为0，value为1时tag为rank
+        P[i].tag = rank * v; 
         rank += v;
     }
 
-    // 6. 分配输出控制位空间 (Bit-Packed)
-    // 总开关数 = (N/2) * l
-    // 字节数 = (TotalBits + 7) / 8
+    // 6. 分配输出控制位空间 (One Byte Per Switch)
     const size_t switchesPerStage = out_Npad / 2;
     const size_t totalSwitches = switchesPerStage * out_l;
-    const size_t packedSize = (totalSwitches + 7) >> 3; 
     
-    ctrlBits.assign(packedSize, 0);
+    // 【修改点】不再压缩，直接分配 totalSwitches 大小
+    ctrlBits.assign(totalSwitches, 0);
 
     return true;
 }
@@ -75,10 +61,8 @@ static void GenKernel( std::vector<BNPacket>& P, uint32_t Npad, uint32_t l, std:
     for (uint32_t d = 0; d < l; ++d)
     {
         const uint32_t stride = (1u << d);
-        // 遍历所有 Butterfly Block
         for (uint32_t b = 0; b < Npad; b += (stride << 1))
         {
-            // Block 内部遍历
             for (uint32_t k = 0; k < stride; ++k)
             {
                 const uint32_t i = b + k;
@@ -90,10 +74,8 @@ static void GenKernel( std::vector<BNPacket>& P, uint32_t Npad, uint32_t l, std:
                 const uint8_t c = (uint8_t)((P[i].value & bit_i) |
                                             (P[j].value & (bit_j ^ 1u)));
 
-                // 【位压缩写入】
-                if (c) {
-                    SET_BIT(ctrlBits, t);
-                }
+                // 【修改点】直接写入 Byte
+                ctrlBits[t] = c;
                 t++;
 
                 oswap_buffer<OSWAP_8>(
@@ -112,14 +94,13 @@ static void RecGenKernel(std::vector<BNPacket>& P, size_t start, size_t len, int
     
     size_t half = len / 2;
 
-    // 1. 递归左半部分 (bit_idx - 1)
+    // 1. 递归左半部分
     RecGenKernel(P, start, half, bit_idx - 1, ctrlBits, t);
 
-    // 2. 递归右半部分 (bit_idx - 1)
+    // 2. 递归右半部分
     RecGenKernel(P, start + half, half, bit_idx - 1, ctrlBits, t);
 
-    // 3. 当前层合并 (Merge)
-    // 此时 bit 0 ... bit_idx-1 已经处理完毕，现在根据 bit_idx 进行交换
+    // 3. 当前层合并
     for (size_t k = 0; k < half; ++k)
     {
         const size_t i = start + k;
@@ -133,10 +114,7 @@ static void RecGenKernel(std::vector<BNPacket>& P, size_t start, size_t len, int
         const uint8_t c = (uint8_t)((P[i].value & bit_i) |
                                     (P[j].value & (bit_j ^ 1u)));
 
-        // 【位压缩写入】
-        if (c) {
-            SET_BIT(ctrlBits, t);
-        }
+        ctrlBits[t] = c;
         t++;
 
         oswap_buffer<OSWAP_8>(
@@ -157,12 +135,10 @@ void generateControlBits(const bool *selected_list, size_t n, std::vector<uint8_
     uint32_t Npad = 0;
     uint32_t l = 0;
 
-    // 调用公共准备函数
     if (!PrepareCompactionContext(selected_list, n, ctrlBits, P, Npad, l)) {
         return;
     }
 
-    // 执行迭代逻辑
     GenKernel(P, Npad, l, ctrlBits);
 }
 // 递归版接口
@@ -174,15 +150,12 @@ void RecGenerateControlBits(const bool* selected_list, size_t n, std::vector<uin
     uint32_t Npad = 0;
     uint32_t l = 0;
 
-    // 调用公共准备函数
     if (!PrepareCompactionContext(selected_list, n, ctrlBits, P, Npad, l)) {
         return;
     }
 
-    // 执行递归逻辑
     size_t t = 0;
     if (l > 0) {
-        // 从最高层 l-1 开始递归，对应整个数组
         RecGenKernel(P, 0, Npad, (int)l - 1, ctrlBits, t);
     }
 }
@@ -236,6 +209,29 @@ static inline void RecApplyButterflyCompact(unsigned char* buf, size_t N, size_t
     }
 }
 
+static inline void RecApplyTripletCompact(const bool *selected_list, unsigned char* buf, size_t N, size_t block_size)
+{
+    if (block_size == 4)
+    {
+        RecTripletCompact<OSWAP_4>(selected_list, buf, N, block_size);
+    }
+    else if (block_size == 8)
+    {
+        RecTripletCompact<OSWAP_8>(selected_list, buf, N, block_size);
+    }
+    else if (block_size == 12)
+    {
+        RecTripletCompact<OSWAP_12>(selected_list, buf, N, block_size);
+    }
+    else if (block_size % 16 == 0)
+    {
+        RecTripletCompact<OSWAP_16X>(selected_list, buf, N, block_size);
+    }
+    else
+    {
+        RecTripletCompact<OSWAP_8_16X>(selected_list, buf, N, block_size);
+    }
+}
 
 double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_size, bool *selected_list, enc_ret *ret)
 {
@@ -267,7 +263,7 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
     std::vector<uint8_t> ctrlBits;
     ocall_clock(&t1);
     // generateControlBits(selected_list, N, ctrlBits);
-    RecGenerateControlBits(selected_list, N, ctrlBits);
+    // RecGenerateControlBits(selected_list, N, ctrlBits);
     ocall_clock(&t2);
 
     double cb_ms = ((double)(t2 - t1)) / 1000.0;
@@ -287,7 +283,8 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
 
     ocall_clock(&t1);
     // applyButterflyCompact(buffer, N, block_size, ctrlBits);
-    RecApplyButterflyCompact(buffer, N, block_size, ctrlBits); 
+    // RecApplyButterflyCompact(buffer, N, block_size, ctrlBits); 
+    RecApplyTripletCompact(selected_list, buffer, N, block_size);
     ocall_clock(&t2);
 
     double ap_ms = ((double)(t2 - t1)) / 1000.0;
@@ -298,9 +295,6 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
     size_t oswap_ap = 0;
 #endif
 
-    // ----------------
-    // Populate ret
-    // ----------------
     if (ret)
     {
         ret->control_bits_time = cb_ms;
@@ -314,6 +308,3 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
 
     return cb_ms + ap_ms;
 }
-
-
-
