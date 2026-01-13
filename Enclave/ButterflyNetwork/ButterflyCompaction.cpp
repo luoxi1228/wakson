@@ -5,93 +5,76 @@
 
 struct BNPacket
 {
-    uint32_t value;
-    uint32_t tag;
+    uint32_t value : 1;
+    uint32_t tag : 31;
 };
 
-static_assert(sizeof(BNPacket) == 8, "BNPacket must be 8 bytes");
+static_assert(sizeof(BNPacket) == 4, "BNPacket size must be 4 bytes");
+
+inline void set_bit(uint8_t* arr, size_t idx) {
+    arr[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+}
 
 
-static bool PrepareCompactionContext(const bool *selected_list, size_t n, std::vector<uint8_t> &ctrlBits, std::vector<BNPacket> &P, uint32_t &out_Npad, uint32_t &out_l){
+static bool PrepareCompactionContext(const bool *selected_list, size_t n, std::vector<uint8_t> &ctrlBits, std::vector<BNPacket> &P, uint32_t &out_Npad, uint32_t &level){
     // 1. 输入检查
-    ctrlBits.clear();
-    if (!selected_list || n == 0)
-        return false;
+    if (!selected_list && n > 0) return false;
 
-    // 2. 计算 Padding
+    ctrlBits.clear();
+    P.clear();
+
+    if (n == 0) return false;
+
+    // 2. Padding
     out_Npad = nextPow2_u32((uint32_t)n);
     if (out_Npad < 2u)
         return false;
 
     // 3. 计算层数 l
-    out_l = 0;
+    level = 0;
     for (uint32_t t = out_Npad; t > 1; t >>= 1)
-        ++out_l;
+        ++level;
 
     // 4. 初始化 Packet 数组
     P.resize(out_Npad);
-    for (uint32_t i = 0; i < out_Npad; ++i)
-    {
-        uint32_t is_selected = (i < n && selected_list[i]) ? 1u : 0u;
-        P[i].value = is_selected;
+    for (uint32_t i = 0; i < out_Npad; ++i){
+        bool is_selected = (i < n) ? selected_list[i] : false;  
+        P[i].value = is_selected ? 1u : 0u;
         P[i].tag = 0;
     }
 
     // 5. 计算 Rank (Tag) - Prefix Sum
     uint32_t rank = 0;
-    for (uint32_t i = 0; i < out_Npad; ++i)
-    {
-        const uint32_t v = P[i].value;
-        P[i].tag = rank * v; 
-        rank += v;
+    for (uint32_t i = 0; i < out_Npad; ++i) {
+        if (P[i].value) {
+            if (rank >= (1u << 31)) return false; // 防止 tag 溢出
+            P[i].tag = rank;
+            rank++;
+        } else {
+            P[i].tag = 0;
+        }
     }
 
     // 6. 分配输出控制位空间 (One Byte Per Switch)
     const size_t switchesPerStage = out_Npad / 2;
-    const size_t totalSwitches = switchesPerStage * out_l;
-    
-    // 【修改点】不再压缩，直接分配 totalSwitches 大小
-    ctrlBits.assign(totalSwitches, 0);
+    const size_t totalSwitches = switchesPerStage * (size_t)level;
+    const size_t ctrlBitsLenBytes = (totalSwitches + 7) / 8;
+
+    try {
+        // resize 自动初始化为 0
+        ctrlBits.resize(ctrlBitsLenBytes, 0); 
+    } catch (...) { 
+        return false; 
+    }
 
     return true;
 }
 
-static void GenKernel( std::vector<BNPacket>& P, uint32_t Npad, uint32_t l, std::vector<uint8_t> &ctrlBits){
-    size_t t = 0; // 全局开关计数器
-    for (uint32_t d = 0; d < l; ++d)
-    {
-        const uint32_t stride = (1u << d);
-        for (uint32_t b = 0; b < Npad; b += (stride << 1))
-        {
-            for (uint32_t k = 0; k < stride; ++k)
-            {
-                const uint32_t i = b + k;
-                const uint32_t j = b + k + stride;
 
-                const uint32_t bit_i = (P[i].tag >> d) & 1u;
-                const uint32_t bit_j = (P[j].tag >> d) & 1u;
+static void RecGenKernel(std::vector<BNPacket>& P, size_t start, size_t len, uint32_t bit_idx, std::vector<uint8_t> &ctrlBits, size_t& t){
 
-                const uint8_t c = (uint8_t)((P[i].value & bit_i) |
-                                            (P[j].value & (bit_j ^ 1u)));
-
-                // 【修改点】直接写入 Byte
-                ctrlBits[t] = c;
-                t++;
-
-                oswap_buffer<OSWAP_8>(
-                    (unsigned char *)&P[i],
-                    (unsigned char *)&P[j],
-                    8u,
-                    c);
-            }
-        }
-    }
-}
-
-static void RecGenKernel(std::vector<BNPacket>& P, size_t start, size_t len, int bit_idx, std::vector<uint8_t>& ctrlBits, size_t& t){
-    // Base Case
     if (len <= 1) return;
-    
+
     size_t half = len / 2;
 
     // 1. 递归左半部分
@@ -100,88 +83,52 @@ static void RecGenKernel(std::vector<BNPacket>& P, size_t start, size_t len, int
     // 2. 递归右半部分
     RecGenKernel(P, start + half, half, bit_idx - 1, ctrlBits, t);
 
+    uint8_t* ctrlBitsPtr = ctrlBits.data();
+
     // 3. 当前层合并
     for (size_t k = 0; k < half; ++k)
     {
         const size_t i = start + k;
         const size_t j = start + half + k;
 
-        uint32_t d = (uint32_t)bit_idx;
+        const bool bit_i = ((P[i].tag >> (unsigned)bit_idx) & 1u) != 0;
+        const bool bit_j = ((P[j].tag >> (unsigned)bit_idx) & 1u) != 0;
 
-        const uint32_t bit_i = (P[i].tag >> d) & 1u;
-        const uint32_t bit_j = (P[j].tag >> d) & 1u;
+        // c=1 表示交换
+        const bool c = (P[i].value && bit_i) || (P[j].value && !bit_j);
 
-        const uint8_t c = (uint8_t)((P[i].value & bit_i) |
-                                    (P[j].value & (bit_j ^ 1u)));
-
-        ctrlBits[t] = c;
+        if (c) {
+            set_bit(ctrlBitsPtr, t);
+        }
         t++;
 
-        oswap_buffer<OSWAP_8>(
+        oswap_buffer<OSWAP_4>(
             (unsigned char *)&P[i],
             (unsigned char *)&P[j],
-            8u,
-            c);
+            4u,
+            (uint8_t)c
+        );
+
     }
 }
 
 
-// 迭代版接口
-void generateControlBits(const bool *selected_list, size_t n, std::vector<uint8_t> &ctrlBits)
-{
-    FOAV_SAFE_CNTXT(Butterfly_CONTROLBIT, n)
-
-    std::vector<BNPacket> P;
-    uint32_t Npad = 0;
-    uint32_t l = 0;
-
-    if (!PrepareCompactionContext(selected_list, n, ctrlBits, P, Npad, l)) {
-        return;
-    }
-
-    GenKernel(P, Npad, l, ctrlBits);
-}
-// 递归版接口
 void RecGenerateControlBits(const bool* selected_list, size_t n, std::vector<uint8_t>& ctrlBits)
 {
     FOAV_SAFE_CNTXT(Butterfly_REC_CONTROLBIT, n)
 
     std::vector<BNPacket> P;
     uint32_t Npad = 0;
-    uint32_t l = 0;
+    uint32_t level = 0;
 
-    if (!PrepareCompactionContext(selected_list, n, ctrlBits, P, Npad, l)) {
+    if (!PrepareCompactionContext(selected_list, n, ctrlBits, P, Npad, level)) {
+        ctrlBits.clear();
         return;
     }
 
     size_t t = 0;
-    if (l > 0) {
-        RecGenKernel(P, 0, Npad, (int)l - 1, ctrlBits, t);
-    }
-}
-
-
-static inline void applyButterflyCompact(unsigned char *buf, size_t N, size_t block_size, const std::vector<uint8_t> &ctrlBits)
-{
-    if (block_size == 4)
-    {
-        applyCompaction<OSWAP_4>(buf, N, block_size, ctrlBits);
-    }
-    else if (block_size == 8)
-    {
-        applyCompaction<OSWAP_8>(buf, N, block_size, ctrlBits);
-    }
-    else if (block_size == 12)
-    {
-        applyCompaction<OSWAP_12>(buf, N, block_size, ctrlBits);
-    }
-    else if (block_size % 16 == 0)
-    {
-        applyCompaction<OSWAP_16X>(buf, N, block_size, ctrlBits);
-    }
-    else
-    {
-        applyCompaction<OSWAP_8_16X>(buf, N, block_size, ctrlBits);
+    if (level > 0) {
+        RecGenKernel(P, 0, Npad, level - 1, ctrlBits, t);
     }
 }
 
@@ -263,7 +210,7 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
     std::vector<uint8_t> ctrlBits;
     ocall_clock(&t1);
     // generateControlBits(selected_list, N, ctrlBits);
-    // RecGenerateControlBits(selected_list, N, ctrlBits);
+    RecGenerateControlBits(selected_list, N, ctrlBits);
     ocall_clock(&t2);
 
     double cb_ms = ((double)(t2 - t1)) / 1000.0;
@@ -283,8 +230,8 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
 
     ocall_clock(&t1);
     // applyButterflyCompact(buffer, N, block_size, ctrlBits);
-    // RecApplyButterflyCompact(buffer, N, block_size, ctrlBits); 
-    RecApplyTripletCompact(selected_list, buffer, N, block_size);
+    RecApplyButterflyCompact(buffer, N, block_size, ctrlBits); 
+    //RecApplyTripletCompact(selected_list, buffer, N, block_size);
     ocall_clock(&t2);
 
     double ap_ms = ((double)(t2 - t1)) / 1000.0;

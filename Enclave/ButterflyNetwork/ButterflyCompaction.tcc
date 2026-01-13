@@ -8,120 +8,97 @@
 #include <cstdio>
 #include <cstdlib>
 
-template <OSwap_Style oswap_style>
-inline void applyCompaction(unsigned char* buf, size_t n, size_t block_size, const std::vector<uint8_t>& ctrlBits) { 
-    FOAV_SAFE2_CNTXT(Butterfly_applyCompaction, n, block_size)
 
-    if (!buf || n < 2) return;
-
-    const uint32_t Npad = nextPow2_u32((uint32_t)n);
-    if (Npad < 2u) return;
-
-    uint32_t l = 0;
-    {
-        uint32_t tmp = Npad;
-        while (tmp > 1u) { tmp >>= 1u; ++l; }
-    }
-
-    // 1. 计算总开关数
-    const size_t totalSwitches = ((size_t)Npad / 2) * (size_t)l;
-    
-    // 期望大小不再是 Packed Size，而是 totalSwitches
-    const size_t expectedSize = totalSwitches;
-
-    if (ctrlBits.size() != expectedSize) {
-        printf("applyCompaction: ctrlBits.size=%zu expected=%zu\n",
-               ctrlBits.size(), expectedSize);
-        return;
-    }
-
-    unsigned char* work = buf;
-    unsigned char* tmp = nullptr;
-    if ((uint32_t)n != Npad) {
-        tmp = (unsigned char*)malloc((size_t)Npad * block_size);
-        if (!tmp) {
-            printf("applyCompaction: malloc failed (Npad=%u)\n", Npad);
-            return;
-        }
-        std::memcpy(tmp, buf, n * block_size);
-        std::memset(tmp + n * block_size, 0, ((size_t)Npad - n) * block_size);
-        work = tmp;
-    }
-
-    size_t t = 0;
-    for (uint32_t d = 0; d < l; ++d) {
-        const uint32_t stride = (1u << d);
-
-        for (uint32_t b = 0; b < Npad; b += (stride << 1)) {
-            for (uint32_t k = 0; k < stride; ++k) {
-                const uint32_t i = b + k;
-                const uint32_t j = b + k + stride;
-
-                // 【修改点】直接读取 Byte，移除位运算
-                const uint8_t c = ctrlBits[t]; 
-                t++;
-
-                oswap_buffer<oswap_style>(
-                    work + (size_t)block_size * (size_t)i,
-                    work + (size_t)block_size * (size_t)j,
-                    (uint32_t)block_size,
-                    c);
-            }
-        }
-    }
-
-    if (tmp) {
-        std::memcpy(buf, tmp, n * block_size);
-        free(tmp);
-    }
+// 读取压缩位
+inline bool get_bit(const std::vector<uint8_t>& bits, size_t idx) {
+    return (bits[idx >> 3] >> (idx & 7)) & 1u;
 }
 
+// 专门用于快速读取位的流对象
+struct BitStream {
+    const uint8_t* data;  // 指向 vector 数据的裸指针
+    size_t byte_idx;      // 当前读取到的字节索引
+    int bit_idx;          // 当前字节内的位偏移 (0-7)
+    uint8_t current_byte; // 缓存当前字节，减少内存访问
+
+    // 构造函数
+    BitStream(const std::vector<uint8_t>& bits) {
+        data = bits.data();
+        byte_idx = 0;
+        bit_idx = 0;
+        // 预加载第一个字节（假设 bits 不为空）
+        if (!bits.empty()) {
+            current_byte = data[0];
+        }
+    }
+
+    // 极速读取下一个位 (Force Inline)
+    inline bool next() {
+        // 直接从寄存器缓存中提取位
+        bool val = (current_byte >> bit_idx) & 1u;
+        
+        bit_idx++;
+        // 分支预测非常友好，每8次才触发一次
+        if (bit_idx == 8) {
+            byte_idx++;
+            current_byte = data[byte_idx]; // 只有这里才会访问内存
+            bit_idx = 0;
+        }
+        return val;
+    }
+};
 
 template <OSwap_Style oswap_style>
-static void RecApplyKernel(unsigned char* work, size_t start, size_t len, size_t block_size, const std::vector<uint8_t>& ctrlBits, size_t& t)
+static void RecApplyKernel(
+    unsigned char* work,
+    size_t start,
+    size_t len,
+    size_t block_size,
+    const std::vector<uint8_t>& ctrlBits,
+    BitStream& bs)
 {
     if (len <= 1) return;
 
-    size_t half = len / 2;
+    const size_t half = len / 2;
 
-    RecApplyKernel<oswap_style>(work, start, half, block_size, ctrlBits, t);
-    RecApplyKernel<oswap_style>(work, start + half, half, block_size, ctrlBits, t);
+    RecApplyKernel<oswap_style>(work, start, half, block_size, ctrlBits, bs);
+    RecApplyKernel<oswap_style>(work, start + half, half, block_size, ctrlBits, bs);
 
     for (size_t k = 0; k < half; ++k)
     {
         const size_t i = start + k;
         const size_t j = start + half + k;
 
-        const uint8_t c = ctrlBits[t];
-        t++;
+        bool c = bs.next();
 
         oswap_buffer<oswap_style>(
-            work + (size_t)block_size * (size_t)i,
-            work + (size_t)block_size * (size_t)j,
+            work + block_size * i,
+            work + block_size * j,
             (uint32_t)block_size,
-            c);
+            (uint8_t)c);
+
     }
 }
 
-template <OSwap_Style oswap_style>
-inline void RecApplyCompaction(unsigned char* buf, size_t n, size_t block_size, const std::vector<uint8_t>& ctrlBits) {
-    FOAV_SAFE2_CNTXT(Butterfly_RecApply, n, block_size)
 
+template <OSwap_Style oswap_style>
+inline void RecApplyCompaction(
+    unsigned char* buf,
+    size_t n,
+    size_t block_size,
+    const std::vector<uint8_t>& ctrlBits)
+{
+    FOAV_SAFE2_CNTXT(Butterfly_RecApply, n, block_size)
     if (!buf || n < 2) return;
 
     const uint32_t Npad = nextPow2_u32((uint32_t)n);
     if (Npad < 2u) return;
 
     uint32_t l = 0;
-    {
-        uint32_t tmp = Npad;
-        while (tmp > 1u) { tmp >>= 1u; ++l; }
-    }
-    const size_t totalSwitches = ((size_t)Npad / 2) * (size_t)l;
-    
-    // 校验大小为 totalSwitches
-    const size_t expectedSize = totalSwitches;
+    for (uint32_t tmp = Npad; tmp > 1u; tmp >>= 1u) ++l;
 
+    const size_t totalSwitches = (size_t)(Npad / 2) * (size_t)l;
+    const size_t expectedSize = (totalSwitches + 7) / 8;
     if (ctrlBits.size() != expectedSize) {
         printf("RecApplyCompaction: ctrlBits.size=%zu expected=%zu\n",
                ctrlBits.size(), expectedSize);
@@ -141,8 +118,10 @@ inline void RecApplyCompaction(unsigned char* buf, size_t n, size_t block_size, 
         work = tmp;
     }
 
-    size_t t = 0;
-    RecApplyKernel<oswap_style>(work, 0, Npad, block_size, ctrlBits, t);
+    BitStream bs(ctrlBits);
+
+    RecApplyKernel<oswap_style>(work, 0, Npad, block_size, ctrlBits, bs);
+
 
     if (tmp) {
         std::memcpy(buf, tmp, n * block_size);
@@ -152,15 +131,6 @@ inline void RecApplyCompaction(unsigned char* buf, size_t n, size_t block_size, 
 
 
 
-
-/**
- * 核心递归内核：RecTripletKernel
- * 对应伪代码: Function RecTriplet(T, start, len, bit)
- * * @param buffer       交错排列的大数组指针
- * @param element_size 单个元素的总大小 (block_size + 8)
- * @param meta_offset  Meta数据起始位置 (等于 block_size)
- * @param bit          当前处理的 bit 位
- */
 template <OSwap_Style oswap_style>
 static void RecTripletKernel(unsigned char* buffer, size_t start, size_t len, 
                              size_t element_size, size_t meta_offset, uint32_t bit) 
@@ -214,10 +184,7 @@ static void RecTripletKernel(unsigned char* buffer, size_t start, size_t len,
     }
 }
 
-/**
- * 三元组压缩入口函数：RecTripletCompact
- * 对应伪代码: REC_TRIPLET_COMPACT(A, D)
- */
+
 template <OSwap_Style oswap_style>
 inline void RecTripletCompact(const bool *selected_list, unsigned char* buf, size_t n, size_t block_size) {
     FOAV_SAFE2_CNTXT(Butterfly_RecTriplet, n, block_size)
