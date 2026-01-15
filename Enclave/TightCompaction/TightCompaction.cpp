@@ -7,7 +7,7 @@ double testTightCompaction(unsigned char *buffer, size_t N, size_t block_size,
         size_t nthreads, bool *selected_list, enc_ret *ret) {
   // Test NOP_TightCompaction:
 
-  threadpool_init(nthreads);
+  //threadpool_init(nthreads);
 
   long start_time, stop_time;
   double ptime;
@@ -25,7 +25,7 @@ double testTightCompaction(unsigned char *buffer, size_t N, size_t block_size,
   */ 
   ret->OSWAP_count = OSWAP_COUNTER;
   ret->ptime = ptime;
-  threadpool_shutdown();
+  //threadpool_shutdown();
   return (ptime);
 }
 

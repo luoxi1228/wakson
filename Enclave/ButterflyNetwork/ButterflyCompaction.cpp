@@ -11,10 +11,6 @@ struct BNPacket
 
 static_assert(sizeof(BNPacket) == 4, "BNPacket size must be 4 bytes");
 
-inline void set_bit(uint8_t* arr, size_t idx) {
-    arr[idx >> 3] |= (uint8_t)(1u << (idx & 7));
-}
-
 
 static bool PrepareCompactionContext(const bool *selected_list, size_t n, std::vector<uint8_t> &ctrlBits, std::vector<BNPacket> &P, uint32_t &out_Npad, uint32_t &level){
     // 1. 输入检查
@@ -70,18 +66,87 @@ static bool PrepareCompactionContext(const bool *selected_list, size_t n, std::v
     return true;
 }
 
+// 迭代版
+void generateControlBits(const bool *selected_list, size_t n, std::vector<uint8_t> &ctrlBits)
+{
+    FOAV_SAFE_CNTXT(Butterfly_CONTROLBIT, n)
 
-static void RecGenKernel(std::vector<BNPacket>& P, size_t start, size_t len, uint32_t bit_idx, std::vector<uint8_t> &ctrlBits, size_t& t){
+    std::vector<BNPacket> P;
+    uint32_t Npad = 0;
+    uint32_t l = 0;
+
+    if (!PrepareCompactionContext(selected_list, n, ctrlBits, P, Npad, l)) {
+        return;
+    }
+
+    size_t t = 0;                 // 全局开关计数器
+    uint8_t* ctrlBitsPtr = ctrlBits.data();
+
+    for (uint32_t d = 0; d < l; ++d)
+    {
+        const uint32_t stride = (1u << d);
+        for (uint32_t b = 0; b < Npad; b += (stride << 1))
+        {
+            for (uint32_t k = 0; k < stride; ++k)
+            {
+                const uint32_t i = b + k;
+                const uint32_t j = b + k + stride;
+
+                const uint32_t bit_i = (P[i].tag >> d) & 1u;
+                const uint32_t bit_j = (P[j].tag >> d) & 1u;
+
+                const uint8_t c = (uint8_t)((P[i].value & bit_i) |
+                                            (P[j].value & (bit_j ^ 1u)));
+
+                if (c) set_bit(ctrlBitsPtr, t);
+                ++t;
+
+                oswap_buffer<OSWAP_4>(
+                    (unsigned char *)&P[i],
+                    (unsigned char *)&P[j],
+                    4u,
+                    c);
+            }
+        }
+    }
+}
+static inline void applyButterflyCompact(unsigned char *buf, size_t N, size_t block_size, const std::vector<uint8_t> &ctrlBits)
+{
+    if (block_size == 4)
+    {
+        applyCompaction<OSWAP_4>(buf, N, block_size, ctrlBits);
+    }
+    else if (block_size == 8)
+    {
+        applyCompaction<OSWAP_8>(buf, N, block_size, ctrlBits);
+    }
+    else if (block_size == 12)
+    {
+        applyCompaction<OSWAP_12>(buf, N, block_size, ctrlBits);
+    }
+    else if (block_size % 16 == 0)
+    {
+        applyCompaction<OSWAP_16X>(buf, N, block_size, ctrlBits);
+    }
+    else
+    {
+        applyCompaction<OSWAP_8_16X>(buf, N, block_size, ctrlBits);
+    }
+}
+
+
+// 递归版
+static void generateControlBitsRec_inner(std::vector<BNPacket>& P, size_t start, size_t len, uint32_t bit_idx, std::vector<uint8_t> &ctrlBits, size_t& t){
 
     if (len <= 1) return;
 
     size_t half = len / 2;
 
     // 1. 递归左半部分
-    RecGenKernel(P, start, half, bit_idx - 1, ctrlBits, t);
+    generateControlBitsRec_inner(P, start, half, bit_idx - 1, ctrlBits, t);
 
     // 2. 递归右半部分
-    RecGenKernel(P, start + half, half, bit_idx - 1, ctrlBits, t);
+    generateControlBitsRec_inner(P, start + half, half, bit_idx - 1, ctrlBits, t);
 
     uint8_t* ctrlBitsPtr = ctrlBits.data();
 
@@ -111,9 +176,7 @@ static void RecGenKernel(std::vector<BNPacket>& P, size_t start, size_t len, uin
 
     }
 }
-
-
-void RecGenerateControlBits(const bool* selected_list, size_t n, std::vector<uint8_t>& ctrlBits)
+void generateControlBitsRec(const bool* selected_list, size_t n, std::vector<uint8_t>& ctrlBits)
 {
     FOAV_SAFE_CNTXT(Butterfly_REC_CONTROLBIT, n)
 
@@ -128,34 +191,140 @@ void RecGenerateControlBits(const bool* selected_list, size_t n, std::vector<uin
 
     size_t t = 0;
     if (level > 0) {
-        RecGenKernel(P, 0, Npad, level - 1, ctrlBits, t);
+        generateControlBitsRec_inner(P, 0, Npad, level - 1, ctrlBits, t);
     }
 }
-
-static inline void RecApplyButterflyCompact(unsigned char* buf, size_t N, size_t block_size, const std::vector<uint8_t>& ctrlBits)
+static inline void applyButterflyCompactRec(unsigned char* buf, size_t N, size_t block_size, const std::vector<uint8_t>& ctrlBits)
 {
     if (block_size == 4)
     {
-        RecApplyCompaction<OSWAP_4>(buf, N, block_size, ctrlBits);
+        applyCompactionRec<OSWAP_4>(buf, N, block_size, ctrlBits);
     }
     else if (block_size == 8)
     {
-        RecApplyCompaction<OSWAP_8>(buf, N, block_size, ctrlBits);
+        applyCompactionRec<OSWAP_8>(buf, N, block_size, ctrlBits);
     }
     else if (block_size == 12)
     {
-        RecApplyCompaction<OSWAP_12>(buf, N, block_size, ctrlBits);
+        applyCompactionRec<OSWAP_12>(buf, N, block_size, ctrlBits);
     }
     else if (block_size % 16 == 0)
     {
-        RecApplyCompaction<OSWAP_16X>(buf, N, block_size, ctrlBits);
+        applyCompactionRec<OSWAP_16X>(buf, N, block_size, ctrlBits);
     }
     else
     {
-        RecApplyCompaction<OSWAP_8_16X>(buf, N, block_size, ctrlBits);
+        applyCompactionRec<OSWAP_8_16X>(buf, N, block_size, ctrlBits);
+    }
+}
+static inline void applyButterflyCompactRecIter( unsigned char* buf, size_t N, size_t block_size, const std::vector<uint8_t>& ctrlBits)
+{
+    if (block_size == 4) {
+        applyCompactionRecIter<OSWAP_4>(buf, N, block_size, ctrlBits);
+    } else if (block_size == 8) {
+        applyCompactionRecIter<OSWAP_8>(buf, N, block_size, ctrlBits);
+    } else if (block_size == 12) {
+        applyCompactionRecIter<OSWAP_12>(buf, N, block_size, ctrlBits);
+    } else if (block_size % 16 == 0) {
+        applyCompactionRecIter<OSWAP_16X>(buf, N, block_size, ctrlBits);
+    } else {
+        applyCompactionRecIter<OSWAP_8_16X>(buf, N, block_size, ctrlBits);
     }
 }
 
+
+//OR 版
+static void generateControlBitsOR_inner2power(const bool* M, size_t start, size_t n, uint32_t z, std::vector<uint8_t>& Cbits, size_t& t){
+    if (n <= 1) return;
+
+    // m = Sum(M[0..n/2-1])  (左半部分 sum)
+    const size_t half = n >> 1;
+    const uint32_t m = range_sum_bool(M, start, start + half);
+
+    if (n == 2) {
+        // bit = ((1 - M0) & M1) ^ z
+        const bool M0 = M[start];
+        const bool M1 = M[start + 1];
+        const bool bit = (((!M0) && M1) ? 1 : 0) ^ (z & 1u);
+        append_bit(Cbits, t, bit);
+        return;
+    }
+
+    // 递归（顺序必须与 Online 一致）
+    generateControlBitsOR_inner2power(M, start,         half, (uint32_t)(z % half),              Cbits, t);
+    generateControlBitsOR_inner2power(M, start + half,  half, (uint32_t)((z + m) % half),        Cbits, t);
+
+    // s = (((z mod half) + m) >= half) ^ (z >= half)
+    const bool s = ((((uint32_t)(z % half) + m) >= (uint32_t)half) ? 1 : 0) ^ ((z >= (uint32_t)half) ? 1 : 0);
+
+    const uint32_t threshold = (uint32_t)((z + m) % half);
+    for (uint32_t i = 0; i < (uint32_t)half; ++i) {
+        const bool bit = s ^ (i >= threshold);
+        append_bit(Cbits, t, bit);
+    }
+}
+static void generateControlBitsOR_inner(const bool* M, size_t start, size_t n, std::vector<uint8_t>& Cbits, size_t& t){
+    if (n == 0) return;
+
+    // n1 = largest power of two <= n
+    // n2 = n - n1
+    size_t n1 = 1;
+    while ((n1 << 1) <= n) n1 <<= 1;
+    const size_t n2 = n - n1;
+
+    // m = Sum(M[0..n2-1]) (prefix sum over the non-power-of-two part)
+    const uint32_t m = range_sum_bool(M, start, start + n2);
+
+    // 递归处理 prefix (n2)
+    generateControlBitsOR_inner(M, start, n2, Cbits, t);
+
+    // 处理 suffix (n1)，offset z = n1 - n2 + m
+    const uint32_t z = (uint32_t)(n1 - n2) + m;
+    generateControlBitsOR_inner2power(M, start + n2, n1, z, Cbits, t);
+
+    // 最终合并 loop：for i in [0..n2-1] append (i > m)
+    for (uint32_t i = 0; i < (uint32_t)n2; ++i) {
+        const bool bit = (i > m);
+        append_bit(Cbits, t, bit);
+    }
+}
+void generateControlBitsOR(const bool* selected_list, size_t n, std::vector<uint8_t>& ctrlBits)
+{
+    FOAV_SAFE_CNTXT(OR_COMPACT_CONTROLBIT, n);
+    
+    ctrlBits.clear();
+    
+    if (!selected_list || n == 0) return;
+
+    const size_t roughBits = (n * 2); // 粗略：先给少点也没关系，append_bit 会自动扩容
+
+    ctrlBits.reserve((roughBits + 7) / 8);
+
+    size_t t = 0;
+    generateControlBitsOR_inner(selected_list, 0, n, ctrlBits, t);
+
+    // 末尾把 vector 修到刚好需要的 byte（append_bit 已经保证足够）
+    const size_t needBytes = (t + 7) / 8;
+    ctrlBits.resize(needBytes, 0);
+
+}
+static inline void applyButterflyCompactOR( unsigned char* buf, size_t N, size_t block_size, const std::vector<uint8_t>& ctrlBits)
+{
+    if (block_size == 4) {
+        applyCompactionOR<OSWAP_4>(buf, N, block_size, ctrlBits);
+    } else if (block_size == 8) {
+        applyCompactionOR<OSWAP_8>(buf, N, block_size, ctrlBits);
+    } else if (block_size == 12) {
+        applyCompactionOR<OSWAP_12>(buf, N, block_size, ctrlBits);
+    } else if (block_size % 16 == 0) {
+        applyCompactionOR<OSWAP_16X>(buf, N, block_size, ctrlBits);
+    } else {
+        applyCompactionOR<OSWAP_8_16X>(buf, N, block_size, ctrlBits);
+    }
+}
+
+
+//递归合并版
 static inline void RecApplyTripletCompact(const bool *selected_list, unsigned char* buf, size_t N, size_t block_size)
 {
     if (block_size == 4)
@@ -179,6 +348,8 @@ static inline void RecApplyTripletCompact(const bool *selected_list, unsigned ch
         RecTripletCompact<OSWAP_8_16X>(selected_list, buf, N, block_size);
     }
 }
+
+
 
 double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_size, bool *selected_list, enc_ret *ret)
 {
@@ -209,8 +380,9 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
 
     std::vector<uint8_t> ctrlBits;
     ocall_clock(&t1);
-    // generateControlBits(selected_list, N, ctrlBits);
-    RecGenerateControlBits(selected_list, N, ctrlBits);
+    //generateControlBits(selected_list, N, ctrlBits);
+    //generateControlBitsRec(selected_list, N, ctrlBits);
+    generateControlBitsOR(selected_list, N, ctrlBits);
     ocall_clock(&t2);
 
     double cb_ms = ((double)(t2 - t1)) / 1000.0;
@@ -229,8 +401,9 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
 #endif
 
     ocall_clock(&t1);
-    // applyButterflyCompact(buffer, N, block_size, ctrlBits);
-    RecApplyButterflyCompact(buffer, N, block_size, ctrlBits); 
+    //applyButterflyCompactRecIter(buffer, N, block_size, ctrlBits);
+    //applyButterflyCompactRec(buffer, N, block_size, ctrlBits); 
+    applyButterflyCompactOR(buffer, N, block_size, ctrlBits);
     //RecApplyTripletCompact(selected_list, buffer, N, block_size);
     ocall_clock(&t2);
 

@@ -976,14 +976,14 @@ int main(int argc, char *argv[]){
       case 21:
       case 22:{
 
-                printf("Before TC Correctness check\n");
+                //printf("Before TC Correctness check\n");
                 /*
                 bool tcc_flag = testCompactionCorrectness(buf, N, BLOCK_SIZE, og_buf, selected_list);
                 if(!tcc_flag){
                   printf("Order-preserving compaction INCORRECT\n");
                 }
                 */
-                printf("After TC Correctness check\n");
+                //printf("After TC Correctness check\n");
                 break;
               }
     } 
