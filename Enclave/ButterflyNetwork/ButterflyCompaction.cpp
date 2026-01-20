@@ -351,6 +351,131 @@ static inline void RecApplyTripletCompact(const bool *selected_list, unsigned ch
 
 
 
+static void OptGenerateControlBitsOR_inner2power( const bool* M, const uint32_t* ps, uint32_t start, uint32_t n, uint32_t z, uint8_t* out, size_t& t)
+{
+    if (n <= 1) return;
+
+    uint32_t half = n >> 1;
+    uint32_t m = ps[start + half] - ps[start]; // sum(left half)
+
+    if (n == 2) {
+        bool M0 = M[start];
+        bool M1 = M[start + 1];
+        uint8_t bit = (uint8_t)(((!M0 && M1) ? 1 : 0) ^ (z & 1u));
+        out[t++] = bit;
+        return;
+    }
+
+    // recurse left/right in the same order as apply
+    OptGenerateControlBitsOR_inner2power(M, ps, start,        half, (z & (half - 1u)), out, t);
+    OptGenerateControlBitsOR_inner2power(M, ps, start + half, half, ((z + m) & (half - 1u)), out, t);
+
+    // merge bits: bit(i) = s ^ (i >= threshold)
+    uint32_t zmod = (z & (half - 1u));
+    uint8_t offset_right = (uint8_t)(z >= half);
+    uint8_t left_wrapped = (uint8_t)((zmod + m) >= half);
+    uint8_t s = (uint8_t)(left_wrapped ^ offset_right);
+    uint32_t threshold = (uint32_t)((z + m) & (half - 1u));
+
+    // fill [0, threshold) with s; [threshold, half) with s^1
+    if (threshold) {
+        std::memset(out + t, s, threshold);
+        t += threshold;
+    }
+    uint32_t rest = half - threshold;
+    if (rest) {
+        std::memset(out + t, (uint8_t)(s ^ 1u), rest);
+        t += rest;
+    }
+}
+static void OptGenerateControlBitsOR_inner( const bool* M, const uint32_t* ps, uint32_t start, uint32_t n, uint8_t* out, size_t& t)
+{
+    if (n <= 1) return;
+
+    if (n == 2) {
+        // 对应 offset=0 的 2power base case
+        bool M0 = M[start];
+        bool M1 = M[start + 1];
+        out[t++] = (uint8_t)((!M0 && M1) ? 1 : 0);
+        return;
+    }
+
+    if (is_pow2_u32(n)) {
+        OptGenerateControlBitsOR_inner2power(M, ps, start, n, 0u, out, t);
+        return;
+    }
+
+    // general split: n1=pow2<=n, n2=n-n1
+    uint32_t n1 = pow2_le_u32(n);
+    uint32_t n2 = n - n1;
+
+    // m = sum(prefix n2)
+    uint32_t m = ps[start + n2] - ps[start];
+
+    // 1) prefix general
+    OptGenerateControlBitsOR_inner(M, ps, start, n2, out, t);
+
+    // 2) suffix 2power with offset z = (n1 - n2) + m
+    uint32_t z = (n1 - n2) + m;
+    OptGenerateControlBitsOR_inner2power(M, ps, start + n2, n1, z, out, t);
+
+    // 3) final merge bits for i in [0..n2-1]
+    // original: bit = (i > m)
+    // => zeros length = min(n2, m+1), ones afterwards
+    uint32_t zeros = n2;
+    uint32_t m1 = m + 1u; // careful overflow not possible here
+    if (m1 < zeros) zeros = m1;
+
+    if (zeros) {
+        std::memset(out + t, 0u, zeros);
+        t += zeros;
+    }
+    uint32_t ones = n2 - zeros;
+    if (ones) {
+        std::memset(out + t, 1u, ones);
+        t += ones;
+    }
+}
+void OptGenerateControlBitsOR(const bool* selected_list, size_t n, std::vector<uint8_t>& ctrlBits)
+{
+    FOAV_SAFE_CNTXT(OR_COMPACT_CONTROLBIT, n);
+
+    ctrlBits.clear();
+    if (!selected_list || n == 0) return;
+
+    uint32_t N = (uint32_t)n;
+    if (N < 2u) return;
+
+    //计算总开关数
+    size_t totalSwitches = count_or_switches(N);
+    ctrlBits.resize(totalSwitches);
+
+    // prefix sum for O(1) range sum
+    std::vector<uint32_t> ps(N + 1);
+    ps[0] = 0;
+    for (uint32_t i = 0; i < N; ++i) {
+        ps[i + 1] = ps[i] + (uint32_t)selected_list[i];
+    }
+
+    size_t t = 0;
+    OptGenerateControlBitsOR_inner(selected_list, ps.data(), 0u, N, ctrlBits.data(), t);
+}
+static inline void OptApplyButterflyCompactOR( unsigned char* buf, size_t N, size_t block_size, const std::vector<uint8_t>& ctrlBits)
+{
+    if (block_size == 4) {
+        OptApplyCompactionOR<OSWAP_4>(buf, N, block_size, ctrlBits);
+    } else if (block_size == 8) {
+        OptApplyCompactionOR<OSWAP_8>(buf, N, block_size, ctrlBits);
+    } else if (block_size == 12) {
+        OptApplyCompactionOR<OSWAP_12>(buf, N, block_size, ctrlBits);
+    } else if (block_size % 16 == 0) {
+        OptApplyCompactionOR<OSWAP_16X>(buf, N, block_size, ctrlBits);
+    } else {
+        OptApplyCompactionOR<OSWAP_8_16X>(buf, N, block_size, ctrlBits);
+    }
+}
+
+
 double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_size, bool *selected_list, enc_ret *ret)
 {
     FOAV_SAFE2_CNTXT(testButterflyCompaction, N, block_size)
@@ -382,7 +507,8 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
     ocall_clock(&t1);
     //generateControlBits(selected_list, N, ctrlBits);
     //generateControlBitsRec(selected_list, N, ctrlBits);
-    generateControlBitsOR(selected_list, N, ctrlBits);
+    //generateControlBitsOR(selected_list, N, ctrlBits);
+    OptGenerateControlBitsOR(selected_list, N, ctrlBits);
     ocall_clock(&t2);
 
     double cb_ms = ((double)(t2 - t1)) / 1000.0;
@@ -403,8 +529,9 @@ double testButterflyCompaction(unsigned char *buffer, size_t N, size_t block_siz
     ocall_clock(&t1);
     //applyButterflyCompactRecIter(buffer, N, block_size, ctrlBits);
     //applyButterflyCompactRec(buffer, N, block_size, ctrlBits); 
-    applyButterflyCompactOR(buffer, N, block_size, ctrlBits);
+    //applyButterflyCompactOR(buffer, N, block_size, ctrlBits);
     //RecApplyTripletCompact(selected_list, buffer, N, block_size);
+    OptApplyButterflyCompactOR(buffer, N, block_size, ctrlBits);
     ocall_clock(&t2);
 
     double ap_ms = ((double)(t2 - t1)) / 1000.0;

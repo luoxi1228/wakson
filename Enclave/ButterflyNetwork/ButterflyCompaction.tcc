@@ -524,4 +524,219 @@ inline void applyCompactionOR(unsigned char* buf, size_t n, size_t block_size, c
 
 
 
+template <OSwap_Style oswap_style>
+static inline void OptApplyCompactionOR_inner2power(unsigned char* base, uint32_t len, size_t block_size, const uint8_t* __restrict c, size_t& t){
+    if (len <= 1) return;
+
+    if (len == 2) {
+        uint8_t sw = c[t++];
+        oswap_buffer<oswap_style>(base, base + block_size, (uint32_t)block_size, sw);
+        return;
+    }
+
+    uint32_t half = len >> 1;
+    size_t stride_bytes = (size_t)half * block_size;
+
+    
+    OptApplyCompactionOR_inner2power<oswap_style>(base, half, block_size, c, t);
+    OptApplyCompactionOR_inner2power<oswap_style>(base + stride_bytes, half, block_size, c, t);
+
+    // merge half swaps
+    unsigned char* L = base;
+    unsigned char* R = base + stride_bytes;
+    for (uint32_t i = 0; i < half; ++i) {
+        uint8_t sw = c[t++];
+        oswap_buffer<oswap_style>(L, R, (uint32_t)block_size, sw);
+        L += block_size;
+        R += block_size;
+    }
+}
+
+template <OSwap_Style oswap_style>
+static inline void OptApplyCompactionOR_inner( unsigned char* base, uint32_t len, size_t block_size, const uint8_t* __restrict c, size_t& t){
+    if (len <= 1) return;
+
+    if (len == 2) {
+        uint8_t sw = c[t++];
+        oswap_buffer<oswap_style>(base, base + block_size, (uint32_t)block_size, sw);
+        return;
+    }
+
+    // IMPORTANT: if len is pow2, do pure 2pow apply (avoids n2=0 general semantics)
+    if (is_pow2_u32(len)) {
+        OptApplyCompactionOR_inner2power<oswap_style>(base, len, block_size, c, t);
+        return;
+    }
+
+    uint32_t n1 = pow2_le_u32(len);   // largest pow2 <= len
+    uint32_t n2 = len - n1;
+
+    OptApplyCompactionOR_inner<oswap_style>(base, n2, block_size, c, t);
+
+    unsigned char* Rptr = base + (size_t)n2 * block_size;
+    OptApplyCompactionOR_inner2power<oswap_style>(Rptr, n1, block_size, c, t);
+
+    unsigned char* L = base;
+    unsigned char* R_suffix = base + (size_t)n1 * block_size;
+
+    for (uint32_t i = 0; i < n2; ++i) {
+        uint8_t sw = c[t++];
+        oswap_buffer<oswap_style>(L, R_suffix, (uint32_t)block_size, sw);
+        L += block_size;
+        R_suffix += block_size;
+    }
+}
+
+/*
+template <OSwap_Style oswap_style>
+inline void OptApplyCompactionOR( unsigned char* buf, size_t n, size_t block_size, const std::vector<uint8_t>& ctrlBits){
+    FOAV_SAFE2_CNTXT(OR_applyCompaction, n, block_size)
+    if (!buf || n < 2) return;
+
+    uint32_t N = (uint32_t)n;
+    if (N < 2u) return;
+
+    size_t totalSwitches = count_or_switches(N);
+    if (ctrlBits.size() != totalSwitches) {
+        printf("applyCompactionOR: ctrlBits.size=%zu expected=%zu\n",
+               ctrlBits.size(), totalSwitches);
+        return;
+    }
+
+    const uint8_t* __restrict c = ctrlBits.data();
+    size_t t = 0;
+
+    // Root: if N is pow2, go 2pow; else go general
+    if (is_pow2_u32(N)) {
+        OptApplyCompactionOR_inner2power<oswap_style>(buf, N, block_size, c, t);
+    } else {
+        OptApplyCompactionOR_inner<oswap_style>(buf, N, block_size, c, t);
+    }
+
+    // Debug: ensure all bits consumed (optional)
+    // assert(t == totalSwitches);
+}
+*/
+
+template <OSwap_Style oswap_style>
+inline void OptApplyCompactionOR(unsigned char* buf, size_t n, size_t block_size, const std::vector<uint8_t>& ctrlBits){
+    FOAV_SAFE2_CNTXT(OR_applyCompaction, n, block_size)
+    if (!buf || n < 2) return;
+
+    uint32_t N = (uint32_t)n;
+    if (N < 2u) return;
+
+    size_t totalSwitches = count_or_switches(N);
+    if (ctrlBits.size() != totalSwitches) {
+        printf("applyCompactionOR: ctrlBits.size=%zu expected=%zu\n",
+               ctrlBits.size(), totalSwitches);
+        return;
+    }
+
+    const uint8_t* __restrict c = ctrlBits.data();
+    size_t t = 0;
+
+    enum Kind : uint8_t { GEN = 0, POW2 = 1 };
+
+    struct Frame {
+        unsigned char* base;
+        uint32_t len;
+        uint8_t state; // 0,1,2
+        Kind kind;
+        // 仅 GEN 用：
+        uint32_t n1;
+        uint32_t n2;
+    };
+
+    std::vector<Frame> st;
+    st.reserve(64);
+
+    // root kind：若本身是 pow2，直接 POW2，否则 GEN
+    Kind rootKind = is_pow2_u32(N) ? POW2 : GEN;
+    st.push_back(Frame{buf, N, 0u, rootKind, 0u, 0u});
+
+    while (!st.empty()) {
+        Frame& f = st.back();
+
+        if (f.len <= 1) { st.pop_back(); continue; }
+
+        // len==2 统一处理（无论 GEN/POW2），消费 1 个 ctrl byte
+        if (f.len == 2) {
+            uint8_t sw = c[t++];
+            oswap_buffer<oswap_style>(f.base, f.base + block_size, (uint32_t)block_size, sw);
+            st.pop_back();
+            continue;
+        }
+
+        // 若 kind==GEN 但 len 是 pow2，直接按 POW2 执行（避免 n2=0 offset 语义问题）
+        if (f.kind == GEN && is_pow2_u32(f.len)) {
+            f.kind = POW2;
+            f.state = 0;
+            continue;
+        }
+
+        if (f.kind == POW2) {
+            uint32_t half = f.len >> 1;
+            size_t stride_bytes = (size_t)half * block_size;
+
+            if (f.state == 0) {
+                f.state = 1;
+                st.push_back(Frame{f.base, half, 0u, POW2, 0u, 0u});
+                continue;
+            }
+            if (f.state == 1) {
+                f.state = 2;
+                st.push_back(Frame{f.base + stride_bytes, half, 0u, POW2, 0u, 0u});
+                continue;
+            }
+
+            // merge half swaps
+            unsigned char* L = f.base;
+            unsigned char* R = f.base + stride_bytes;
+            for (uint32_t i = 0; i < half; ++i) {
+                uint8_t sw = c[t++];
+                oswap_buffer<oswap_style>(L, R, (uint32_t)block_size, sw);
+                L += block_size;
+                R += block_size;
+            }
+            st.pop_back();
+            continue;
+        }
+
+        // f.kind == GEN, len is NOT pow2 here
+        if (f.state == 0) {
+            uint32_t n1 = pow2_le_u32(f.len);
+            uint32_t n2 = f.len - n1;
+            f.n1 = n1;
+            f.n2 = n2;
+            f.state = 1;
+
+            // prefix general
+            st.push_back(Frame{f.base, n2, 0u, GEN, 0u, 0u});
+            continue;
+        }
+
+        if (f.state == 1) {
+            f.state = 2;
+            // suffix pow2
+            unsigned char* Rptr = f.base + (size_t)f.n2 * block_size;
+            st.push_back(Frame{Rptr, f.n1, 0u, POW2, 0u, 0u});
+            continue;
+        }
+
+        // state == 2: final merge (n2 swaps): L prefix vs suffix of R (start at base + n1*block_size)
+        unsigned char* L = f.base;
+        unsigned char* R_suffix = f.base + (size_t)f.n1 * block_size;
+        for (uint32_t i = 0; i < f.n2; ++i) {
+            uint8_t sw = c[t++];
+            oswap_buffer<oswap_style>(L, R_suffix, (uint32_t)block_size, sw);
+            L += block_size;
+            R_suffix += block_size;
+        }
+        st.pop_back();
+    }
+
+    // 调试期可 assert(t == totalSwitches)
+}
+
 #endif // __BUTTERFLY_COMPACTION_TCC__

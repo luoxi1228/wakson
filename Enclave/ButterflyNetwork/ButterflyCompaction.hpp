@@ -53,6 +53,35 @@ static inline uint32_t range_sum_bool(const bool* A, size_t l, size_t r) {
   return s;
 }
 
+static inline uint32_t ilog2_u32(uint32_t x) {
+    return 31u - (uint32_t)__builtin_clz(x);
+}
+
+static inline bool is_pow2_u32(uint32_t x) {
+    return x && ((x & (x - 1u)) == 0);
+}
+
+// largest power of two <= n  (n>=1)
+static inline uint32_t pow2_le_u32(uint32_t n) {
+    return 1u << ilog2_u32(n);
+}
+
+// 2power 网络的 comparator 数： N/2 * log2(N)
+static inline size_t count_2pow_switches(uint32_t Npow2) {
+    if (Npow2 < 2) return 0;
+    return ((size_t)Npow2 >> 1) * (size_t)ilog2_u32(Npow2);
+}
+
+// 网络的 comparator 数
+static size_t count_or_switches(uint32_t n) {
+    if (n <= 1) return 0;
+    if (n == 2) return 1;
+    if (is_pow2_u32(n)) return count_2pow_switches(n);
+
+    uint32_t n1 = pow2_le_u32(n);
+    uint32_t n2 = n - n1;
+    return count_or_switches(n2) + count_2pow_switches(n1) + (size_t)n2;
+}
 
 
 // -------- offline ----------
